@@ -42,7 +42,7 @@ export default function OfficeKitMobileDashboard() {
     {
       type: "assistant",
       content:
-        "Hello! I'm your HR assistant. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. How can I help you today?",
+        "Hello! I'm your Nemo Ai. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. How can I help you today?",
     },
   ])
   const [currentMessage, setCurrentMessage] = useState("")
@@ -578,7 +578,7 @@ export default function OfficeKitMobileDashboard() {
                   <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white animate-pulse" />
                 </div>
                 <div>
-                  <CardTitle className="text-lg font-semibold text-gray-900">HR Assistant</CardTitle>
+                  <CardTitle className="text-lg font-semibold text-gray-900">Nemo Ai</CardTitle>
                   <p className="text-xs text-gray-500">Always here to help</p>
                 </div>
               </div>
@@ -607,7 +607,7 @@ export default function OfficeKitMobileDashboard() {
                           <div className="w-6 h-6 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center">
                             <MessageCircle className="h-3 w-3 text-white" />
                           </div>
-                          <span className="text-xs text-gray-500 font-medium">HR Assistant</span>
+                          <span className="text-xs text-gray-500 font-medium">Nemo Ai</span>
                         </div>
                       )}
                       <div
