@@ -32,6 +32,7 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { LeaveApplicationModal } from "./components/leave-application-modal"
+import { AttendanceModal } from "./components/attendance-modal"
 
 export default function OfficeKitMobileDashboard() {
   const [isVoiceAssistantOpen, setIsVoiceAssistantOpen] = useState(false)
@@ -42,13 +43,72 @@ export default function OfficeKitMobileDashboard() {
     {
       type: "assistant",
       content:
-        "Hello! I'm your HR assistant. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. How can I help you today?",
+        "Hello! I'm your HR assistant. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. Try saying 'I need leave from tomorrow to Friday' or 'Apply sick leave for 3 days'. How can I help you today?",
     },
   ])
   const [currentMessage, setCurrentMessage] = useState("")
   const [activeTab, setActiveTab] = useState("home")
   const [leaveApplications, setLeaveApplications] = useState([])
+  const [conversationContext, setConversationContext] = useState({
+    isCollectingLeaveInfo: false,
+    leaveData: {},
+    currentStep: "",
+    missingFields: [],
+  })
   const recognitionRef = useRef(null)
+
+  const [attendanceData, setAttendanceData] = useState({
+    todayStatus: "checked-out", // "checked-in", "checked-out", "not-started"
+    checkInTime: null,
+    checkOutTime: null,
+    totalHours: 0,
+    breakTime: 0,
+    isOnBreak: false,
+    breakStartTime: null,
+  })
+  const [attendanceHistory, setAttendanceHistory] = useState([
+    {
+      date: "2024-01-30",
+      checkIn: "09:15 AM",
+      checkOut: "06:30 PM",
+      totalHours: "9h 15m",
+      status: "present",
+      overtime: "1h 15m",
+    },
+    {
+      date: "2024-01-29",
+      checkIn: "09:00 AM",
+      checkOut: "06:00 PM",
+      totalHours: "9h 00m",
+      status: "present",
+      overtime: "1h 00m",
+    },
+    {
+      date: "2024-01-28",
+      checkIn: "09:30 AM",
+      checkOut: "06:15 PM",
+      totalHours: "8h 45m",
+      status: "present",
+      overtime: "0h 45m",
+    },
+    {
+      date: "2024-01-27",
+      checkIn: "10:00 AM",
+      checkOut: "06:00 PM",
+      totalHours: "8h 00m",
+      status: "late",
+      overtime: "0h 00m",
+    },
+    {
+      date: "2024-01-26",
+      checkIn: "-",
+      checkOut: "-",
+      totalHours: "0h 00m",
+      status: "absent",
+      overtime: "0h 00m",
+    },
+  ])
+  const [showAttendanceModal, setShowAttendanceModal] = useState(false)
 
   // Mock user data
   const userData = {
@@ -111,11 +171,24 @@ export default function OfficeKitMobileDashboard() {
     { name: "Profile", icon: User, key: "profile" },
   ]
 
-  // Voice recognition setup
+  const [microphoneSupported, setMicrophoneSupported] = useState(false)
+  const [microphonePermission, setMicrophonePermission] = useState<"granted" | "denied" | "prompt" | "unknown">(
+    "unknown",
+  )
+
+  // Enhanced voice recognition setup with better error handling
   useEffect(() => {
-    if (typeof window !== "undefined" && "webkitSpeechRecognition" in window) {
-      const recognition = new (window as any).webkitSpeechRecognition()
-      recognition.continuous = true
+    // Check if speech recognition is supported
+    const isSupported =
+      typeof window !== "undefined" && ("webkitSpeechRecognition" in window || "SpeechRecognition" in window)
+
+    setMicrophoneSupported(isSupported)
+
+    if (isSupported) {
+      const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+      const recognition = new SpeechRecognition()
+
+      recognition.continuous = false
       recognition.interimResults = true
       recognition.lang = "en-US"
 
@@ -129,27 +202,457 @@ export default function OfficeKitMobileDashboard() {
         if (finalTranscript) {
           setVoiceText(finalTranscript)
           setCurrentMessage(finalTranscript)
+          setIsListening(false)
         }
       }
 
-      recognition.onerror = () => setIsListening(false)
-      recognition.onend = () => setIsListening(false)
+      recognition.onerror = (event: any) => {
+        console.error("Speech recognition error:", event.error)
+        setIsListening(false)
+
+        // Handle specific errors with user-friendly messages
+        let errorMessage = ""
+        switch (event.error) {
+          case "not-allowed":
+            errorMessage =
+              "🎤 **Microphone Access Required**\n\nTo use voice commands:\n1. Click the microphone icon in your browser's address bar\n2. Select 'Allow' for microphone access\n3. Try the voice command again\n\nYou can still type your messages normally! 📝"
+            break
+          case "no-speech":
+            errorMessage = "🔇 No speech detected. Please try speaking again or use the text input."
+            break
+          case "audio-capture":
+            errorMessage =
+              "🎤 **Microphone Not Available**\n\nYour microphone might be:\n• Used by another application\n• Not connected properly\n• Disabled in system settings\n\nPlease check your microphone and try again, or use text input instead."
+            break
+          case "network":
+            errorMessage = "🌐 Network error occurred. Please check your internet connection and try again."
+            break
+          default:
+            errorMessage = `🚫 Voice recognition error: ${event.error}. Please try again or use text input.`
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            type: "assistant",
+            content: errorMessage,
+          },
+        ])
+      }
+
+      recognition.onend = () => {
+        setIsListening(false)
+      }
+
       recognitionRef.current = recognition
     }
   }, [])
 
-  const startListening = () => {
-    if (recognitionRef.current) {
+  // Check microphone permission on component mount
+  useEffect(() => {
+    const checkMicrophonePermission = async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setMicrophonePermission("denied")
+        return
+      }
+
+      try {
+        // Check if permissions API is available
+        if (navigator.permissions && navigator.permissions.query) {
+          const permission = await navigator.permissions.query({ name: "microphone" as PermissionName })
+          setMicrophonePermission(permission.state)
+
+          permission.onchange = () => {
+            setMicrophonePermission(permission.state)
+          }
+        } else {
+          // Fallback: assume prompt if we can't check
+          setMicrophonePermission("prompt")
+        }
+      } catch (error) {
+        console.log("Permission check failed:", error)
+        setMicrophonePermission("unknown")
+      }
+    }
+
+    checkMicrophonePermission()
+  }, [])
+
+  const startListening = async () => {
+    if (!microphoneSupported) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          type: "assistant",
+          content:
+            "🚫 **Voice Recognition Not Supported**\n\nYour browser doesn't support voice recognition. Please use the text input instead.\n\n**Supported Browsers:**\n• Chrome\n• Edge\n• Safari (iOS 14.5+)\n• Firefox (with flag enabled)",
+        },
+      ])
+      return
+    }
+
+    if (!recognitionRef.current) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          type: "assistant",
+          content: "🚫 Voice recognition is not available. Please use the text input instead.",
+        },
+      ])
+      return
+    }
+
+    if (isListening) return
+
+    try {
+      // First, try to get microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+
+      // If we get here, we have permission
+      stream.getTracks().forEach((track) => track.stop()) // Clean up the stream
+
       setIsListening(true)
+      setVoiceText("")
       recognitionRef.current.start()
+    } catch (error: any) {
+      console.error("Error accessing microphone:", error)
+      setIsListening(false)
+
+      let errorMessage = ""
+      if (error.name === "NotAllowedError") {
+        errorMessage =
+          "🎤 **Microphone Permission Denied**\n\nTo enable voice commands:\n1. Click the microphone icon in your browser's address bar\n2. Select 'Allow' for microphone access\n3. Refresh the page and try again\n\nYou can always type your message instead! ✨"
+      } else if (error.name === "NotFoundError") {
+        errorMessage =
+          "🎤 **No Microphone Found**\n\nPlease:\n1. Connect a microphone to your device\n2. Check your system audio settings\n3. Try refreshing the page\n\nYou can use text input in the meantime! 📝"
+      } else if (error.name === "NotReadableError") {
+        errorMessage =
+          "🎤 **Microphone Busy**\n\nYour microphone might be:\n• Used by another application\n• Hardware issue\n• Driver problem\n\nPlease close other apps using the microphone and try again, or use text input! 💬"
+      } else {
+        errorMessage = `🚫 **Microphone Error**\n\nError: ${error.message}\n\nPlease try:\n1. Refreshing the page\n2. Checking your microphone settings\n3. Using text input instead\n\nI'm here to help either way! 😊`
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          type: "assistant",
+          content: errorMessage,
+        },
+      ])
     }
   }
 
   const stopListening = () => {
-    if (recognitionRef.current) {
-      setIsListening(false)
-      recognitionRef.current.stop()
+    if (recognitionRef.current && isListening) {
+      try {
+        recognitionRef.current.stop()
+        setIsListening(false)
+      } catch (error) {
+        console.error("Error stopping speech recognition:", error)
+        setIsListening(false)
+      }
     }
+  }
+
+  // Enhanced date parsing function
+  const parseNaturalDate = (text: string) => {
+    const today = new Date()
+    const tomorrow = new Date(today)
+    tomorrow.setDate(today.getDate() + 1)
+
+    const dayAfterTomorrow = new Date(today)
+    dayAfterTomorrow.setDate(today.getDate() + 2)
+
+    const nextWeek = new Date(today)
+    nextWeek.setDate(today.getDate() + 7)
+
+    const nextMonth = new Date(today)
+    nextMonth.setMonth(today.getMonth() + 1)
+
+    const lowerText = text.toLowerCase()
+
+    // Common date patterns
+    if (lowerText.includes("today")) return today.toISOString().split("T")[0]
+    if (lowerText.includes("tomorrow")) return tomorrow.toISOString().split("T")[0]
+    if (lowerText.includes("day after tomorrow")) return dayAfterTomorrow.toISOString().split("T")[0]
+    if (lowerText.includes("next week")) return nextWeek.toISOString().split("T")[0]
+    if (lowerText.includes("next month")) return nextMonth.toISOString().split("T")[0]
+
+    // Day names
+    const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+    for (let i = 0; i < days.length; i++) {
+      if (lowerText.includes(days[i])) {
+        const targetDay = new Date(today)
+        const currentDay = today.getDay()
+        const daysUntilTarget = (i - currentDay + 7) % 7 || 7
+        targetDay.setDate(today.getDate() + daysUntilTarget)
+        return targetDay.toISOString().split("T")[0]
+      }
+    }
+
+    // Month names with dates
+    const months = [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december",
+    ]
+
+    for (let i = 0; i < months.length; i++) {
+      if (lowerText.includes(months[i])) {
+        const dateMatch = lowerText.match(new RegExp(`(\\d{1,2})\\s*${months[i]}|${months[i]}\\s*(\\d{1,2})`))
+        if (dateMatch) {
+          const day = Number.parseInt(dateMatch[1] || dateMatch[2])
+          const date = new Date(today.getFullYear(), i, day)
+          if (date < today) date.setFullYear(today.getFullYear() + 1)
+          return date.toISOString().split("T")[0]
+        }
+      }
+    }
+
+    // Numeric date patterns (DD/MM, MM/DD, etc.)
+    const datePatterns = [
+      /(\d{1,2})\/(\d{1,2})\/(\d{4})/,
+      /(\d{1,2})-(\d{1,2})-(\d{4})/,
+      /(\d{1,2})\/(\d{1,2})/,
+      /(\d{1,2})-(\d{1,2})/,
+    ]
+
+    for (const pattern of datePatterns) {
+      const match = text.match(pattern)
+      if (match) {
+        let day, month, year
+        if (match[3]) {
+          // Full date with year
+          day = Number.parseInt(match[1])
+          month = Number.parseInt(match[2]) - 1
+          year = Number.parseInt(match[3])
+        } else {
+          // Date without year
+          day = Number.parseInt(match[1])
+          month = Number.parseInt(match[2]) - 1
+          year = today.getFullYear()
+        }
+        const date = new Date(year, month, day)
+        if (date < today && !match[3]) date.setFullYear(today.getFullYear() + 1)
+        return date.toISOString().split("T")[0]
+      }
+    }
+
+    return null
+  }
+
+  // Enhanced leave information extraction
+  const extractLeaveInfo = (message: string) => {
+    const lowerMessage = message.toLowerCase()
+    const leaveInfo: any = {}
+
+    // Extract leave type
+    if (lowerMessage.includes("sick") || lowerMessage.includes("medical") || lowerMessage.includes("illness")) {
+      leaveInfo.leaveType = "sick"
+    } else if (
+      lowerMessage.includes("annual") ||
+      lowerMessage.includes("vacation") ||
+      lowerMessage.includes("holiday")
+    ) {
+      leaveInfo.leaveType = "annual"
+    } else if (lowerMessage.includes("casual") || lowerMessage.includes("personal")) {
+      leaveInfo.leaveType = "casual"
+    } else if (lowerMessage.includes("maternity")) {
+      leaveInfo.leaveType = "maternity"
+    } else if (lowerMessage.includes("paternity")) {
+      leaveInfo.leaveType = "paternity"
+    }
+
+    // Extract dates
+    const fromPatterns = [/from\s+(.+?)\s+to/i, /starting\s+(.+?)\s+to/i, /beginning\s+(.+?)\s+to/i, /from\s+(.+?)$/i]
+
+    const toPatterns = [/to\s+(.+?)(?:\s|$)/i, /until\s+(.+?)(?:\s|$)/i, /till\s+(.+?)(?:\s|$)/i]
+
+    for (const pattern of fromPatterns) {
+      const match = message.match(pattern)
+      if (match) {
+        const startDate = parseNaturalDate(match[1])
+        if (startDate) leaveInfo.startDate = startDate
+        break
+      }
+    }
+
+    for (const pattern of toPatterns) {
+      const match = message.match(pattern)
+      if (match) {
+        const endDate = parseNaturalDate(match[1])
+        if (endDate) leaveInfo.endDate = endDate
+        break
+      }
+    }
+
+    // Extract duration
+    const durationPatterns = [
+      /for\s+(\d+)\s+days?/i,
+      /(\d+)\s+days?\s+leave/i,
+      /(\d+)\s+days?\s+off/i,
+      /take\s+(\d+)\s+days?/i,
+    ]
+
+    for (const pattern of durationPatterns) {
+      const match = message.match(pattern)
+      if (match) {
+        const days = Number.parseInt(match[1])
+        leaveInfo.duration = days
+        if (leaveInfo.startDate && !leaveInfo.endDate) {
+          const start = new Date(leaveInfo.startDate)
+          const end = new Date(start)
+          end.setDate(start.getDate() + days - 1)
+          leaveInfo.endDate = end.toISOString().split("T")[0]
+        }
+        break
+      }
+    }
+
+    // Extract half day
+    if (lowerMessage.includes("half day") || lowerMessage.includes("half-day")) {
+      leaveInfo.halfDay = true
+    }
+
+    // Extract reason
+    const reasonPatterns = [
+      /because\s+(.+?)(?:\.|$)/i,
+      /due to\s+(.+?)(?:\.|$)/i,
+      /for\s+(.+?)(?:\s+from|\s+to|$)/i,
+      /reason\s*:\s*(.+?)(?:\.|$)/i,
+    ]
+
+    for (const pattern of reasonPatterns) {
+      const match = message.match(pattern)
+      if (match && !match[1].match(/\d+\s+days?/i)) {
+        leaveInfo.reason = match[1].trim()
+        break
+      }
+    }
+
+    return leaveInfo
+  }
+
+  const handleCheckIn = () => {
+    const now = new Date()
+    const timeString = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+    setAttendanceData((prev) => ({
+      ...prev,
+      todayStatus: "checked-in",
+      checkInTime: timeString,
+      checkOutTime: null,
+    }))
+
+    // Add success message to voice assistant
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: "assistant",
+        content: `✅ **Check-in Successful!**
+
+🕘 **Time**: ${timeString}
+📍 **Location**: Office - Main Building
+📱 **Method**: Mobile App
+
+**Today's Schedule**:
+• Work Hours: 8:00 AM - 5:00 PM
+• Lunch Break: 12:00 PM - 1:00 PM
+• Meetings: 2 scheduled
+
+Have a productive day, ${userData.name}! 🌟`,
+      },
+    ])
+  }
+
+  const handleCheckOut = () => {
+    const now = new Date()
+    const timeString = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+    // Calculate total hours (simplified calculation)
+    const checkInTime = attendanceData.checkInTime
+    const totalHours = "8h 30m" // Mock calculation
+
+    setAttendanceData((prev) => ({
+      ...prev,
+      todayStatus: "checked-out",
+      checkOutTime: timeString,
+      totalHours: totalHours,
+    }))
+
+    // Add to attendance history
+    const today = new Date().toISOString().split("T")[0]
+    const newRecord = {
+      date: today,
+      checkIn: checkInTime || "09:15 AM",
+      checkOut: timeString,
+      totalHours: totalHours,
+      status: "present",
+      overtime: "0h 30m",
+    }
+
+    setAttendanceHistory((prev) => [newRecord, ...prev])
+
+    // Add success message to voice assistant
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: "assistant",
+        content: `✅ **Check-out Successful!**
+
+🕘 **Check-out Time**: ${timeString}
+⏱️ **Total Hours**: ${totalHours}
+🎯 **Status**: Great work today!
+
+**Today's Summary**:
+• Check-in: ${checkInTime}
+• Check-out: ${timeString}
+• Break Time: 1h 00m
+• Overtime: 0h 30m
+
+Rest well and see you tomorrow! 👋`,
+      },
+    ])
+  }
+
+  const handleBreakToggle = () => {
+    const now = new Date()
+    const timeString = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+    setAttendanceData((prev) => ({
+      ...prev,
+      isOnBreak: !prev.isOnBreak,
+      breakStartTime: !prev.isOnBreak ? timeString : null,
+    }))
+
+    const action = attendanceData.isOnBreak ? "ended" : "started"
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: "assistant",
+        content: `${attendanceData.isOnBreak ? "⏰" : "☕"} **Break ${action}!**
+
+🕘 **Time**: ${timeString}
+${attendanceData.isOnBreak ? "⏱️ **Break Duration**: Calculating..." : "🍽️ **Enjoy your break!**"}
+
+${attendanceData.isOnBreak ? "Welcome back! Ready to continue your productive day." : "Take your time to recharge. Don't forget to stay hydrated! 💧"}`,
+      },
+    ])
   }
 
   const handleSendMessage = () => {
@@ -164,7 +667,7 @@ export default function OfficeKitMobileDashboard() {
       // Add typing indicator
       setMessages((prev) => [...prev, { type: "assistant", content: "Typing...", isTyping: true }])
 
-      // Simulate AI processing with faster response
+      // Process message with context
       setTimeout(() => {
         const response = getAIResponse(userMessage)
         const aiMessage = response?.message || "I'm here to help with HR-related queries. Please try again."
@@ -182,52 +685,222 @@ export default function OfficeKitMobileDashboard() {
             setIsLeaveModalOpen(true)
             setIsVoiceAssistantOpen(false)
           }, 500)
+        } else if (aiAction === "open_leave_modal_with_data") {
+          setTimeout(() => {
+            setIsLeaveModalOpen(true)
+            setIsVoiceAssistantOpen(false)
+          }, 500)
         }
-      }, 800) // Faster response time
+      }, 600)
     }
   }
 
   const getAIResponse = (message: string) => {
     const lowerMessage = message.toLowerCase()
 
-    // Leave related queries
-    if (lowerMessage.includes("leave") || lowerMessage.includes("vacation") || lowerMessage.includes("time off")) {
-      if (lowerMessage.includes("apply") || lowerMessage.includes("request") || lowerMessage.includes("take")) {
-        return {
-          message: `I'll help you apply for leave. You have ${userData.leaveBalance.annual} annual leave days, ${userData.leaveBalance.sick} sick days, and ${userData.leaveBalance.casual} casual days remaining. Let me open the leave application form for you.`,
-          action: "open_leave_modal",
+    // Check if we're in a conversation flow
+    if (conversationContext.isCollectingLeaveInfo) {
+      return handleLeaveConversationFlow(message)
+    }
+
+    // Extract leave information from natural language
+    const leaveInfo = extractLeaveInfo(message)
+
+    // Leave related queries with intelligent parsing
+    if (
+      lowerMessage.includes("leave") ||
+      lowerMessage.includes("vacation") ||
+      lowerMessage.includes("time off") ||
+      lowerMessage.includes("sick") ||
+      lowerMessage.includes("holiday") ||
+      Object.keys(leaveInfo).length > 0
+    ) {
+      if (
+        lowerMessage.includes("apply") ||
+        lowerMessage.includes("request") ||
+        lowerMessage.includes("take") ||
+        lowerMessage.includes("need") ||
+        lowerMessage.includes("want") ||
+        Object.keys(leaveInfo).length > 0
+      ) {
+        // Check if we have enough information to proceed
+        const hasStartDate = leaveInfo.startDate || lowerMessage.includes("today") || lowerMessage.includes("tomorrow")
+        const hasEndDate = leaveInfo.endDate || leaveInfo.duration || leaveInfo.halfDay
+        const hasLeaveType = leaveInfo.leaveType
+
+        if (hasStartDate && hasEndDate && hasLeaveType) {
+          // We have enough info, prepare for modal
+          const leaveTypeNames = {
+            sick: "Sick Leave",
+            annual: "Annual Leave",
+            casual: "Casual Leave",
+            maternity: "Maternity Leave",
+            paternity: "Paternity Leave",
+          }
+
+          return {
+            message: `Perfect! I've understood your leave request:
+
+📅 **Leave Type**: ${leaveTypeNames[leaveInfo.leaveType] || "Annual Leave"}
+📅 **Start Date**: ${leaveInfo.startDate ? new Date(leaveInfo.startDate).toLocaleDateString() : "Not specified"}
+📅 **End Date**: ${leaveInfo.endDate ? new Date(leaveInfo.endDate).toLocaleDateString() : "Not specified"}
+${leaveInfo.halfDay ? "⏰ **Half Day**: Yes" : ""}
+${leaveInfo.reason ? `📝 **Reason**: ${leaveInfo.reason}` : ""}
+
+Let me open the leave application form with this information pre-filled for you to review and submit.`,
+            action: "open_leave_modal_with_data",
+          }
+        } else {
+          // Start conversation flow to collect missing info
+          setConversationContext({
+            isCollectingLeaveInfo: true,
+            leaveData: leaveInfo,
+            currentStep: "start",
+            missingFields: [],
+          })
+
+          let response = "I'll help you apply for leave! "
+
+          if (Object.keys(leaveInfo).length > 0) {
+            response += "I've captured some information:\n"
+            if (leaveInfo.leaveType) response += `• Leave Type: ${leaveInfo.leaveType}\n`
+            if (leaveInfo.startDate) response += `• Start Date: ${new Date(leaveInfo.startDate).toLocaleDateString()}\n`
+            if (leaveInfo.endDate) response += `• End Date: ${new Date(leaveInfo.endDate).toLocaleDateString()}\n`
+            if (leaveInfo.reason) response += `• Reason: ${leaveInfo.reason}\n`
+            response += "\n"
+          }
+
+          if (!hasLeaveType) {
+            response += "What type of leave do you need? (sick, annual, casual, maternity, paternity)"
+          } else if (!hasStartDate) {
+            response += "When do you want to start your leave? (e.g., tomorrow, Monday, 15th December)"
+          } else if (!hasEndDate) {
+            response += "When will your leave end? (e.g., Friday, for 3 days, half day)"
+          }
+
+          return { message: response, action: null }
         }
       } else if (lowerMessage.includes("balance") || lowerMessage.includes("remaining")) {
         return {
-          message: `Here's your current leave balance:\n• Annual Leave: ${userData.leaveBalance.annual} days\n• Sick Leave: ${userData.leaveBalance.sick} days\n• Casual Leave: ${userData.leaveBalance.casual} days\n• Paternity Leave: ${userData.leaveBalance.paternity} days\n\nWould you like to apply for leave?`,
+          message: `Here's your current leave balance:
+
+💙 **Annual Leave**: ${userData.leaveBalance.annual} days remaining
+❤️ **Sick Leave**: ${userData.leaveBalance.sick} days remaining  
+💚 **Casual Leave**: ${userData.leaveBalance.casual} days remaining
+💜 **Paternity Leave**: ${userData.leaveBalance.paternity} days remaining
+
+Would you like to apply for leave? Just say something like "I need sick leave for 2 days starting tomorrow"`,
           action: null,
         }
       } else if (lowerMessage.includes("policy") || lowerMessage.includes("rules")) {
         return {
-          message:
-            "Here are the key leave policies:\n• Annual leave: 21 days per year\n• Sick leave: 12 days per year\n• Casual leave: 12 days per year\n• Maternity leave: 180 days\n• Paternity leave: 15 days\n• Leave requests must be submitted 3 days in advance\n• Medical certificate required for sick leave > 3 days",
+          message: `📋 **Leave Policies**:
+
+🔹 **Annual Leave**: 21 days per year
+🔹 **Sick Leave**: 12 days per year  
+🔹 **Casual Leave**: 12 days per year
+🔹 **Maternity Leave**: 180 days
+🔹 **Paternity Leave**: 15 days
+
+📝 **Important Rules**:
+• Leave requests need 3 days advance notice (except sick leave)
+• Medical certificate required for sick leave > 3 days
+• Emergency contact needed for leaves > 5 days
+• Half-day leaves available for all types
+
+Need to apply for leave? Just tell me your dates!`,
           action: null,
         }
       }
-    }
-
-    // Attendance queries
-    else if (
+    } else if (
       lowerMessage.includes("attendance") ||
       lowerMessage.includes("check in") ||
-      lowerMessage.includes("check out")
+      lowerMessage.includes("check out") ||
+      lowerMessage.includes("present")
     ) {
-      return {
-        message: `Your current attendance is ${userData.attendance}%. You've been quite regular this month! Your last check-in was today at 9:15 AM. Would you like to check in/out now or view your attendance history?`,
-        action: null,
+      if (lowerMessage.includes("check me in") || lowerMessage.includes("check in")) {
+        if (attendanceData.todayStatus === "checked-in") {
+          return {
+            message: `You're already checked in! ✅
+
+🕘 **Check-in Time**: ${attendanceData.checkInTime}
+⏱️ **Current Status**: Working
+📍 **Location**: Office
+
+Would you like to take a break or check your attendance history?`,
+            action: null,
+          }
+        } else {
+          handleCheckIn()
+          return {
+            message: "Processing your check-in...",
+            action: null,
+          }
+        }
+      } else if (lowerMessage.includes("check me out") || lowerMessage.includes("check out")) {
+        if (attendanceData.todayStatus === "checked-out") {
+          return {
+            message: `You're already checked out for today! 👋
+
+🕘 **Check-out Time**: ${attendanceData.checkOutTime}
+⏱️ **Total Hours**: ${attendanceData.totalHours}
+
+Have a great evening!`,
+            action: null,
+          }
+        } else if (attendanceData.todayStatus === "checked-in") {
+          handleCheckOut()
+          return {
+            message: "Processing your check-out...",
+            action: null,
+          }
+        } else {
+          return {
+            message: "You haven't checked in today yet. Would you like to check in first?",
+            action: null,
+          }
+        }
+      } else {
+        return {
+          message: `📊 **Your Attendance Summary**:
+
+✅ **Current Attendance**: ${userData.attendance}%
+🕘 **Today's Status**: ${attendanceData.todayStatus === "checked-in" ? `Checked in at ${attendanceData.checkInTime}` : attendanceData.todayStatus === "checked-out" ? `Checked out at ${attendanceData.checkOutTime}` : "Not checked in yet"}
+📅 **This Month**: 22/23 working days present
+🎯 **Status**: Excellent attendance!
+
+**Quick Actions**:
+• Say "check me in" to mark attendance
+• Say "check me out" to mark departure  
+• Say "attendance history" for detailed report
+• Say "take a break" to start break time
+
+You're doing great with your attendance! 👏`,
+          action: null,
+        }
       }
     }
 
     // Salary/Payroll queries
     else if (lowerMessage.includes("salary") || lowerMessage.includes("payroll") || lowerMessage.includes("payslip")) {
       return {
-        message:
-          "Your November payslip has been generated. Gross salary: ₹50,000, Net salary: ₹42,500 after deductions. Your salary is credited on the last working day of each month. Would you like me to show you the detailed payslip?",
+        message: `💰 **Salary Information**:
+
+📄 **November Payslip**: Generated
+💵 **Gross Salary**: ₹50,000
+💸 **Net Salary**: ₹42,500
+📅 **Credit Date**: Last working day of month
+
+**Deductions**:
+• PF: ₹6,000
+• Tax: ₹1,200  
+• Insurance: ₹300
+
+**Benefits**:
+• Health Insurance: ₹5,00,000 coverage
+• Life Insurance: ₹10,00,000
+
+Need your payslip? Say "show me payslip" or "download payslip"`,
         action: null,
       }
     }
@@ -236,11 +909,31 @@ export default function OfficeKitMobileDashboard() {
     else if (
       lowerMessage.includes("performance") ||
       lowerMessage.includes("review") ||
-      lowerMessage.includes("appraisal")
+      lowerMessage.includes("appraisal") ||
+      lowerMessage.includes("rating")
     ) {
       return {
-        message:
-          "Your performance review is scheduled for next week with Jane Smith. Your current rating is 4.2/5. Key achievements this quarter: Project delivery on time, excellent team collaboration. Areas for improvement: Technical documentation. Would you like to prepare for the review?",
+        message: `⭐ **Performance Overview**:
+
+📊 **Current Rating**: 4.2/5 (Excellent!)
+📅 **Next Review**: Next week with ${userData.manager}
+🎯 **Goals Status**: 8/10 completed
+
+**Recent Achievements**:
+✅ Project delivered on time
+✅ Excellent team collaboration  
+✅ Client satisfaction: 95%
+
+**Areas for Improvement**:
+📝 Technical documentation
+🎓 Advanced skill development
+
+**Preparation Tips**:
+• Review your completed goals
+• Prepare examples of achievements
+• Think about career development plans
+
+Good luck with your review! 🌟`,
         action: null,
       }
     }
@@ -248,8 +941,17 @@ export default function OfficeKitMobileDashboard() {
     // Holiday queries
     else if (lowerMessage.includes("holiday") || lowerMessage.includes("public holiday")) {
       return {
-        message:
-          "Upcoming public holidays:\n• December 25: Christmas Day\n• January 1: New Year's Day\n• January 26: Republic Day\n• March 8: Holi\n\nThese are paid holidays. Would you like to plan your leave around these dates?",
+        message: `🎉 **Upcoming Public Holidays**:
+
+🎄 **December 25**: Christmas Day
+🎊 **January 1**: New Year's Day
+🇮🇳 **January 26**: Republic Day
+🌈 **March 8**: Holi
+🕉️ **March 14**: Maha Shivratri
+
+💡 **Pro Tip**: Plan your annual leave around these holidays for longer breaks!
+
+Want to apply for leave around any of these dates? Just let me know!`,
         action: null,
       }
     }
@@ -258,11 +960,29 @@ export default function OfficeKitMobileDashboard() {
     else if (
       lowerMessage.includes("hr contact") ||
       lowerMessage.includes("hr team") ||
-      lowerMessage.includes("hr support")
+      lowerMessage.includes("hr support") ||
+      lowerMessage.includes("contact hr")
     ) {
       return {
-        message:
-          "HR Team Contact Information:\n• HR Manager: Sarah Johnson (sarah.j@company.com)\n• HR Executive: Mike Chen (mike.c@company.com)\n• Phone: +91-80-1234-5678\n• Office Hours: 9 AM - 6 PM\n• Emergency Contact: +91-98765-43210",
+        message: `📞 **HR Team Contacts**:
+
+👩‍💼 **HR Manager**: Sarah Johnson
+📧 sarah.j@company.com
+📱 +91-80-1234-5678
+
+👨‍💼 **HR Executive**: Mike Chen  
+📧 mike.c@company.com
+📱 +91-80-1234-5679
+
+🕘 **Office Hours**: 9 AM - 6 PM (Mon-Fri)
+🚨 **Emergency**: +91-98765-43210
+
+**Quick Help**:
+• For leave issues: Contact Sarah
+• For payroll queries: Contact Mike
+• For urgent matters: Use emergency number
+
+Need me to connect you with HR? Just ask!`,
         action: null,
       }
     }
@@ -271,26 +991,195 @@ export default function OfficeKitMobileDashboard() {
     else if (
       lowerMessage.includes("benefits") ||
       lowerMessage.includes("insurance") ||
-      lowerMessage.includes("medical")
+      lowerMessage.includes("medical") ||
+      lowerMessage.includes("pf") ||
+      lowerMessage.includes("provident fund")
     ) {
       return {
-        message:
-          "Your employee benefits include:\n• Health Insurance: ₹5,00,000 coverage\n• Life Insurance: ₹10,00,000\n• Provident Fund: 12% contribution\n• Gratuity: As per company policy\n• Flexible work hours\n• Work from home options\n\nNeed help with any specific benefit?",
+        message: `🎁 **Your Employee Benefits**:
+
+🏥 **Health Insurance**:
+• Coverage: ₹5,00,000 per year
+• Family coverage included
+• Cashless treatment at 1000+ hospitals
+
+💼 **Life Insurance**: ₹10,00,000 coverage
+
+💰 **Financial Benefits**:
+• Provident Fund: 12% contribution
+• Gratuity: As per company policy
+• Performance bonus: Quarterly
+
+🏢 **Work Benefits**:
+• Flexible work hours
+• Work from home options
+• Learning & development budget
+
+📱 **Wellness**:
+• Annual health checkup
+• Mental health support
+• Gym membership reimbursement
+
+Need help with any specific benefit? Just ask!`,
+        action: null,
+      }
+    }
+
+    // Greetings and general queries
+    else if (
+      lowerMessage.includes("hello") ||
+      lowerMessage.includes("hi") ||
+      lowerMessage.includes("hey") ||
+      lowerMessage.includes("good morning") ||
+      lowerMessage.includes("good afternoon")
+    ) {
+      const hour = new Date().getHours()
+      const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"
+
+      return {
+        message: `${greeting}, ${userData.name}! 👋
+
+I'm your AI HR assistant, ready to help you with:
+
+🏖️ **Leave Management** - "I need leave tomorrow"
+⏰ **Attendance** - "Check my attendance"  
+💰 **Payroll** - "Show my payslip"
+📊 **Performance** - "My performance review"
+📞 **HR Support** - "Contact HR team"
+🎁 **Benefits** - "My insurance details"
+
+**Quick Examples**:
+• "I need sick leave for 3 days starting Monday"
+• "What's my leave balance?"
+• "When is my next performance review?"
+
+What can I help you with today?`,
         action: null,
       }
     }
 
     // Default response
     return {
-      message:
-        "I'm here to help with HR-related queries. I can assist you with:\n• Leave applications and balance\n• Attendance tracking\n• Payroll and salary information\n• Performance reviews\n• Company policies\n• Benefits information\n• HR contacts\n\nWhat would you like to know?",
+      message: `I'm here to help with HR-related queries! 🤖
+
+**Try asking me**:
+🗣️ "I need leave from tomorrow to Friday"
+🗣️ "Apply sick leave for 2 days"
+🗣️ "What's my attendance this month?"
+🗣️ "Show me my payslip"
+🗣️ "When are the holidays?"
+🗣️ "Contact HR team"
+
+**Voice Commands Work Too!** 🎤
+Just speak naturally like:
+• "I'm sick and need 3 days off"
+• "Book annual leave next Monday"
+• "Check my leave balance"
+
+What would you like to know?`,
       action: null,
+    }
+  }
+
+  const handleLeaveConversationFlow = (message: string) => {
+    const lowerMessage = message.toLowerCase()
+    const currentData = conversationContext.leaveData
+    const leaveInfo = extractLeaveInfo(message)
+
+    // Merge new information
+    const updatedData = { ...currentData, ...leaveInfo }
+
+    // Update leave type if mentioned
+    if (
+      lowerMessage.includes("sick") ||
+      lowerMessage.includes("annual") ||
+      lowerMessage.includes("casual") ||
+      lowerMessage.includes("maternity") ||
+      lowerMessage.includes("paternity")
+    ) {
+      if (lowerMessage.includes("sick")) updatedData.leaveType = "sick"
+      else if (lowerMessage.includes("annual")) updatedData.leaveType = "annual"
+      else if (lowerMessage.includes("casual")) updatedData.leaveType = "casual"
+      else if (lowerMessage.includes("maternity")) updatedData.leaveType = "maternity"
+      else if (lowerMessage.includes("paternity")) updatedData.leaveType = "paternity"
+    }
+
+    // Check what's still missing
+    const hasLeaveType = updatedData.leaveType
+    const hasStartDate = updatedData.startDate
+    const hasEndDate = updatedData.endDate || updatedData.duration || updatedData.halfDay
+
+    if (!hasLeaveType) {
+      setConversationContext({
+        ...conversationContext,
+        leaveData: updatedData,
+        currentStep: "leave_type",
+      })
+      return {
+        message:
+          "What type of leave do you need?\n\n• **Sick** - for illness/medical\n• **Annual** - for vacation/personal\n• **Casual** - for short personal needs\n• **Maternity** - for maternity leave\n• **Paternity** - for paternity leave",
+        action: null,
+      }
+    }
+
+    if (!hasStartDate) {
+      setConversationContext({
+        ...conversationContext,
+        leaveData: updatedData,
+        currentStep: "start_date",
+      })
+      return {
+        message: `Great! ${updatedData.leaveType} leave selected.\n\nWhen do you want to start your leave?\n\nYou can say:\n• "Tomorrow"\n• "Next Monday"\n• "15th December"\n• "Today"`,
+        action: null,
+      }
+    }
+
+    if (!hasEndDate) {
+      setConversationContext({
+        ...conversationContext,
+        leaveData: updatedData,
+        currentStep: "end_date",
+      })
+      return {
+        message: `Perfect! Start date: ${new Date(updatedData.startDate).toLocaleDateString()}\n\nWhen will your leave end?\n\nYou can say:\n• "For 3 days"\n• "Until Friday"\n• "Half day"\n• "Same day"`,
+        action: null,
+      }
+    }
+
+    // We have all required info
+    setConversationContext({
+      isCollectingLeaveInfo: false,
+      leaveData: {},
+      currentStep: "",
+      missingFields: [],
+    })
+
+    const leaveTypeNames = {
+      sick: "Sick Leave",
+      annual: "Annual Leave",
+      casual: "Casual Leave",
+      maternity: "Maternity Leave",
+      paternity: "Paternity Leave",
+    }
+
+    return {
+      message: `Excellent! I have all the information needed:
+
+📋 **Leave Summary**:
+• **Type**: ${leaveTypeNames[updatedData.leaveType]}
+• **Start**: ${new Date(updatedData.startDate).toLocaleDateString()}
+• **End**: ${new Date(updatedData.endDate).toLocaleDateString()}
+${updatedData.halfDay ? "• **Half Day**: Yes" : ""}
+${updatedData.reason ? `• **Reason**: ${updatedData.reason}` : ""}
+
+Opening the leave application form with this information...`,
+      action: "open_leave_modal_with_data",
     }
   }
 
   const speakText = (text: string) => {
     if ("speechSynthesis" in window) {
-      const utterance = new SpeechSynthesisUtterance(text)
+      const utterance = new SpeechSynthesisUtterance(text.replace(/[*#•]/g, ""))
       utterance.rate = 0.8
       utterance.pitch = 1
       window.speechSynthesis.speak(utterance)
@@ -300,6 +1189,8 @@ export default function OfficeKitMobileDashboard() {
   const handleModuleClick = (action: string) => {
     if (action === "leave") {
       setIsLeaveModalOpen(true)
+    } else if (action === "attendance") {
+      setShowAttendanceModal(true)
     }
     // Handle other module actions here
   }
@@ -319,11 +1210,27 @@ export default function OfficeKitMobileDashboard() {
     setIsLeaveModalOpen(false)
 
     // Show success message
-    setMessages([
-      ...messages,
+    setMessages((prev) => [
+      ...prev,
       {
         type: "assistant",
-        content: `✅ Your leave application has been submitted successfully!\n\nDetails:\n• Type: ${leaveData.leaveType}\n• From: ${leaveData.startDate}\n• To: ${leaveData.endDate}\n• Days: ${leaveData.totalDays}\n• Reason: ${leaveData.reason}\n\nYour manager (${userData.manager}) will review and approve your request. You'll receive an email notification once it's processed.`,
+        content: `✅ **Leave Application Submitted Successfully!**
+
+📋 **Application Details**:
+• **Type**: ${leaveData.leaveType}
+• **From**: ${leaveData.startDate}
+• **To**: ${leaveData.endDate}
+• **Days**: ${leaveData.totalDays}
+• **Reason**: ${leaveData.reason}
+
+📧 **Next Steps**:
+• Your manager (${userData.manager}) will review your request
+• You'll receive an email notification once processed
+• Typically takes 1-2 business days for approval
+
+🔔 **Status**: You can check your application status anytime by saying "check my leave status"
+
+Is there anything else I can help you with?`,
       },
     ])
   }
@@ -471,13 +1378,17 @@ export default function OfficeKitMobileDashboard() {
               Apply for Leave
             </Button>
             <div className="grid grid-cols-2 gap-3">
-              <Button variant="outline" className="h-12 bg-transparent">
+              <Button
+                variant="outline"
+                className={`h-12 ${attendanceData.todayStatus === "checked-in" ? "bg-green-50 border-green-200 text-green-700" : "bg-transparent"}`}
+                onClick={attendanceData.todayStatus === "checked-in" ? handleCheckOut : handleCheckIn}
+              >
                 <Clock className="mr-2 h-4 w-4" />
-                Check In
+                {attendanceData.todayStatus === "checked-in" ? "Check Out" : "Check In"}
               </Button>
-              <Button variant="outline" className="h-12 bg-transparent">
-                <FileText className="mr-2 h-4 w-4" />
-                Payslip
+              <Button variant="outline" className="h-12 bg-transparent" onClick={() => setShowAttendanceModal(true)}>
+                <BarChart3 className="mr-2 h-4 w-4" />
+                Attendance
               </Button>
             </div>
           </CardContent>
@@ -575,11 +1486,13 @@ export default function OfficeKitMobileDashboard() {
                   <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center">
                     <MessageCircle className="h-5 w-5 text-white" />
                   </div>
-                  <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white animate-pulse" />
+                  <div
+                    className={`absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white ${isListening ? "animate-pulse" : ""}`}
+                  />
                 </div>
                 <div>
                   <CardTitle className="text-lg font-semibold text-gray-900">HR Assistant</CardTitle>
-                  <p className="text-xs text-gray-500">Always here to help</p>
+                  <p className="text-xs text-gray-500">Smart voice & text support</p>
                 </div>
               </div>
               <Button
@@ -594,7 +1507,10 @@ export default function OfficeKitMobileDashboard() {
 
             <CardContent className="flex-1 flex flex-col p-0">
               {/* Enhanced Messages Container */}
-              <div className="flex-1 p-4 space-y-4 max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
+              <div
+                className="flex-1 p-4 space-y-4 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent"
+                style={{ maxHeight: "calc(60vh - 200px)" }}
+              >
                 {messages.map((message, index) => (
                   <div
                     key={index}
@@ -680,10 +1596,12 @@ export default function OfficeKitMobileDashboard() {
                 {/* Quick Action Buttons */}
                 <div className="flex space-x-2 mb-3 overflow-x-auto scrollbar-none">
                   {[
-                    { text: "Apply for leave", icon: "📅" },
+                    { text: "I need leave tomorrow", icon: "📅" },
                     { text: "Check balance", icon: "💰" },
-                    { text: "Attendance", icon: "⏰" },
-                    { text: "Payslip", icon: "💼" },
+                    { text: "My attendance", icon: "⏰" },
+                    { text: "Show payslip", icon: "💼" },
+                    { text: "Sick leave for 2 days", icon: "🤒" },
+                    { text: "Contact HR", icon: "📞" },
                   ].map((action, index) => (
                     <Button
                       key={index}
@@ -701,7 +1619,7 @@ export default function OfficeKitMobileDashboard() {
                 <div className="space-y-3">
                   <div className="relative">
                     <Textarea
-                      placeholder="Type your HR question or use voice input..."
+                      placeholder="Try: 'I need sick leave for 3 days starting tomorrow' or use voice..."
                       value={currentMessage}
                       onChange={(e) => setCurrentMessage(e.target.value)}
                       className="resize-none text-base pr-12 border-2 border-gray-200 focus:border-blue-400 rounded-xl bg-white shadow-sm transition-all duration-200"
@@ -731,12 +1649,30 @@ export default function OfficeKitMobileDashboard() {
                       size="icon"
                       className={`h-12 w-12 rounded-xl transition-all duration-200 ${
                         isListening
-                          ? "bg-red-500 hover:bg-red-600 animate-pulse"
-                          : "bg-white hover:bg-blue-50 border-2 hover:border-blue-300"
+                          ? "bg-red-500 hover:bg-red-600"
+                          : !microphoneSupported || microphonePermission === "denied"
+                            ? "bg-gray-100 hover:bg-gray-200 border-2 border-gray-300"
+                            : "bg-white hover:bg-blue-50 border-2 hover:border-blue-300"
                       }`}
                       onClick={isListening ? stopListening : startListening}
+                      disabled={!microphoneSupported || microphonePermission === "denied"}
+                      title={
+                        !microphoneSupported
+                          ? "Voice recognition not supported in this browser"
+                          : microphonePermission === "denied"
+                            ? "Microphone access denied. Please enable in browser settings."
+                            : isListening
+                              ? "Stop listening"
+                              : "Start voice input"
+                      }
                     >
-                      {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+                      {isListening ? (
+                        <MicOff className="h-5 w-5" />
+                      ) : !microphoneSupported || microphonePermission === "denied" ? (
+                        <Mic className="h-5 w-5 text-gray-400" />
+                      ) : (
+                        <Mic className="h-5 w-5" />
+                      )}
                     </Button>
 
                     <Button
@@ -749,9 +1685,13 @@ export default function OfficeKitMobileDashboard() {
                     </Button>
                   </div>
 
-                  {/* Typing Indicator */}
+                  {/* Status Indicator */}
                   <div className="flex items-center justify-center space-x-1 text-xs text-gray-400">
-                    <span>Press Enter to send • Shift+Enter for new line</span>
+                    {microphoneSupported ? (
+                      <span>🎤 Voice commands work! • Enter to send • Shift+Enter for new line</span>
+                    ) : (
+                      <span>📝 Text input available • Enter to send • Shift+Enter for new line</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -765,6 +1705,18 @@ export default function OfficeKitMobileDashboard() {
         isOpen={isLeaveModalOpen}
         onClose={() => setIsLeaveModalOpen(false)}
         onSubmit={handleLeaveSubmit}
+        userData={userData}
+      />
+
+      {/* Attendance Modal */}
+      <AttendanceModal
+        isOpen={showAttendanceModal}
+        onClose={() => setShowAttendanceModal(false)}
+        attendanceData={attendanceData}
+        attendanceHistory={attendanceHistory}
+        onCheckIn={handleCheckIn}
+        onCheckOut={handleCheckOut}
+        onBreakToggle={handleBreakToggle}
         userData={userData}
       />
     </div>
