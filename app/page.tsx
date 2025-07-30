@@ -42,7 +42,7 @@ export default function OfficeKitMobileDashboard() {
     {
       type: "assistant",
       content:
-        "Hello! I'm your Nemo Ai. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. How can I help you today?",
+        "Hello! I'm Nemo Ai. I can help you apply for leave, check attendance, view payslips, and answer any HR questions. How can I help you today?",
     },
   ])
   const [currentMessage, setCurrentMessage] = useState("")
